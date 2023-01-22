@@ -1,0 +1,116 @@
+﻿@page "/"
+@inject NavigationManager NavigationManager
+@using Microsoft.AspNetCore.SignalR.Client
+@using Dashboard.Blazor.Data
+@implements IAsyncDisposable
+
+<PageTitle>Index</PageTitle>
+
+<h1>Torn.com | Chat Bot</h1>
+
+<div class="sticky-top w-50 mb-3 mt-3">
+    <form @onsubmit="@(async () => await Send())">
+        <div class="input-group input-group-lg">
+            <select @bind="@_room" class="form-select">
+                <option value="Trade">Trade</option>
+                <option value="New Players">New Players</option>
+            </select>
+
+            <input @bind="@_message" type="text" class="form-control w-auto">
+
+            <button type="submit" class="btn btn-outline-secondary" disabled="@(!IsConnected)">Send</button>
+        </div>
+    </form>
+</div>
+
+<pre>
+    @foreach (var message in _messages)
+    {
+        <div class="text-secondary">[@message.RoomId] @message.SenderName says: @message.MessageText</div>
+    }
+</pre>
+
+@code
+{
+    // Rolling window
+    private readonly Queue<ChatMessage> _messages = new();
+
+    private HubConnection? _hubConnection;
+    private CancellationTokenSource? _channelCancellationTokenSource;
+
+    private string _room = "Trade";
+    private string _message = "";
+
+    private async Task GetChannelStream()
+    {
+        // It's a nullable world!
+        if (_hubConnection is null)
+        {
+            return;
+        }
+
+        // the cancellationToken lets us stop the stream download
+        _channelCancellationTokenSource = new CancellationTokenSource();
+
+        // Create the channel from the hub
+        var channel = await _hubConnection.StreamAsChannelAsync<ChatMessage>("GetChannelStream",
+            _channelCancellationTokenSource.Token);
+
+        // Wait asynchronously for data to become available
+        while (await channel.WaitToReadAsync())
+        {
+            // Read all currently available data synchronously, before waiting for more data
+            while (channel.TryRead(out var message))
+            {
+                if (_messages.Count >= 20)
+                {
+                    _messages.Dequeue();
+                }
+
+                _messages.Enqueue(message);
+
+                // tell Blazor to render the page
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+
+        // Stop the stream
+        _channelCancellationTokenSource.Cancel();
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        // Create the hubConnection
+        _hubConnection = new HubConnectionBuilder()
+            .WithUrl(NavigationManager.ToAbsoluteUri("/chathub"))
+            .Build();
+
+        // Start the hub Connection (connects to the hub);
+        await _hubConnection.StartAsync();
+
+        // Start stream
+        _ = GetChannelStream();;
+    }
+
+    private async Task Send()
+    {
+        if (_hubConnection is not null)
+        {
+            // Send the message to the hub
+            await _hubConnection.SendAsync("SendMessage", _room, _message);
+
+            // Clear the message input field
+            _message = "";
+        }
+    }
+
+    public bool IsConnected => _hubConnection?.State == HubConnectionState.Connected;
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_hubConnection is not null)
+        {
+            await _hubConnection.DisposeAsync();
+        }
+    }
+}
